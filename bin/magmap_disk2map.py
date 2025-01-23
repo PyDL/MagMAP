@@ -15,7 +15,7 @@ import magmap.maps.util.map_manip as map_manip
 import magmap.utilities.file_io.io_helpers as io_helpers
 #
 ########################################
-#  MAGMAP_DISK2MAP.PY:  Version 1.0.0  #
+#  MAGMAP_DISK2MAP.PY:  Version 1.0.1  #
 ########################################
 ########################################################################
 #          Predictive Science Inc.
@@ -346,11 +346,12 @@ def run(args):
     print(' ')
     print('----------------  Timing -------------------')
     print(' ')
-    print(format_str % ("Input/Output:     ", IOtime,          IOtime/total_time*100))
-    print(format_str % ("Image processing: ", image_proc_time, image_proc_time/total_time*100))
-    print(format_str % ("Interpolation:    ", interp_time,     interp_time/total_time*100))
-    print(format_str % ("Down sampling:    ", down_samp_time,  down_samp_time/total_time*100))
-    print(format_str % ("Map processing:   ", map_proc_time,   map_proc_time/total_time*100))
+    if total_time >0: 
+      print(format_str % ("Input/Output:     ", IOtime,          IOtime/total_time*100))
+      print(format_str % ("Image processing: ", image_proc_time, image_proc_time/total_time*100))
+      print(format_str % ("Interpolation:    ", interp_time,     interp_time/total_time*100))
+      print(format_str % ("Down sampling:    ", down_samp_time,  down_samp_time/total_time*100))
+      print(format_str % ("Map processing:   ", map_proc_time,   map_proc_time/total_time*100))
     print('--------------------------------------------')
     print(format_str % ("Total:            ", total_time,      100.0))
     print('---------------------------------------------')
