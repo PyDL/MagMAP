@@ -6,9 +6,12 @@ version = '0.9.0'
 
 
 class DTypes:
-    # LOS datatypes
+    # LOS and Vector datatypes
     LOS_DATA = "float32"
     LOS_AXES = "float32"
+
+    # Vector specific datatypes
+    VEC_DISAMBIG = "uint8"
 
     # PSI Map datatypes
     MAP_DATA = "float32"

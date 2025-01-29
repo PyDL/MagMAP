@@ -4,16 +4,17 @@ Module to hold the custom image and map types specific to the CHD project.
 import datetime
 import os
 import sys
-
+from scipy.ndimage import binary_dilation
 
 import magmap.utilities.file_io.psi_hdf as psihdf
+import magmap.utilities.file_io.io_helpers as io_helpers
 from magmap.data import prep
 import numpy as np
 import pandas as pd
 import sunpy.map
 import sunpy.util.metadata
 from magmap.utilities.coord_manip import interp_los_image_to_map, image_grid_to_CR, interp_los_image_to_map_jitter_test, \
-    interp_los_image_to_map_par
+    interp_los_image_to_map_par, image_helioproject_to_CR
 from magmap.settings.info import DTypes
 
 
@@ -54,19 +55,20 @@ class LosImage:
         self.mu = None
         self.no_data_val = None
 
-    def get_coordinates(self, R0=1.0, cr_lat=0., cr_lon=0., outside_map_val=-9999.):
+    def get_coordinates(self, R0=1.0, cr_lat=0., cr_lon=0., outside_map_val=-9999., helioproject=False):
         """
         Calculate relevant mapping information for each pixel.
+        R0: solar radius (solar radii)
+        cr_lat: observer Carrington latitude
+        cr_lon: observer Carrington longitude
+        outside_map_val: value for pixels that are off the sphere
+        helioproject: True/False - convert from helioprojective cartesian coordinates (True), or use
+          simplified assumptions that ignore foreshortening and apparent radius considerations.
         This adds 2D arrays to the class:
         - lat: carrington latitude
         - lon: carrington longitude
         - mu: cosine of the center to limb angle
         """
-
-        # vectorize image axis grid
-        x_mat, y_mat = np.meshgrid(self.x, self.y)
-        x_vec = x_mat.flatten(order="C")
-        y_vec = y_mat.flatten(order="C")
 
         # determine if image is solar-north-up, or needs an additional rotation
         if hasattr(self, "sunpy_meta"):
@@ -74,22 +76,57 @@ class LosImage:
                 image_crota2 = self.sunpy_meta['crota2']
             else:
                 image_crota2 = 0.
+
+            # retreive distance to sun center
+            D_sun_obs = self.sunpy_meta['dsun_obs']
+            r_sun_ref = self.sunpy_meta['rsun_ref']
         else:
             image_crota2 = 0.
+            D_sun_obs = 1.52E11
+            r_sun_ref = 696000000.0
 
-        # calculate the coordinates
-        cr_theta_all, cr_phi_all, image_mu = image_grid_to_CR(x_vec, y_vec, R0=R0, obsv_lat=cr_lat,
-                                                              obsv_lon=cr_lon, get_mu=True,
-                                                              outside_map_val=outside_map_val,
-                                                              crota2=image_crota2)
+        if helioproject:
+            # revert axis grid to angles (radians)
+            image_in_x = self.x.copy()
+            image_in_y = self.y.copy()
+            if 'rsun_arc' in self.sunpy_meta.keys():
+                rsun_arc = self.sunpy_meta['rsun_arc']
+                image_in_x = image_in_x * rsun_arc
+                image_in_y = image_in_y * rsun_arc
+            else:
+                rsun_obs = self.sunpy_meta['rsun_obs']
+                image_in_x = image_in_x * rsun_obs
+                image_in_y = image_in_y * rsun_obs
+            # convert arcseconds to radians
+            x_rad = image_in_x / 206264.806
+            y_rad = image_in_y / 206264.806
+            # vectorize image axis grid
+            x_mat, y_mat = np.meshgrid(x_rad, y_rad)
+            x_vec = x_mat.flatten(order="C")
+            y_vec = y_mat.flatten(order="C")
+
+            D0 = D_sun_obs/r_sun_ref
+            # calculate the coordinates
+            cr_theta_all, cr_phi_all, image_mu = image_helioproject_to_CR(x_vec, y_vec, D0, R0=R0, obsv_lat=cr_lat,
+                                                                          obsv_lon=cr_lon, get_mu=True,
+                                                                          outside_map_val=outside_map_val,
+                                                                          crota2=image_crota2)
+        else:
+            # vectorize image axis grid
+            x_mat, y_mat = np.meshgrid(self.x, self.y)
+            x_vec = x_mat.flatten(order="C")
+            y_vec = y_mat.flatten(order="C")
+            # calculate the coordinates
+            cr_theta_all, cr_phi_all, image_mu = image_grid_to_CR(x_vec, y_vec, R0=R0, obsv_lat=cr_lat,
+                                                                  obsv_lon=cr_lon, get_mu=True,
+                                                                  outside_map_val=outside_map_val,
+                                                                  crota2=image_crota2)
 
         cr_theta = cr_theta_all.reshape(self.data.shape, order="C")
         cr_phi = cr_phi_all.reshape(self.data.shape, order="C")
         image_mu = image_mu.reshape(self.data.shape, order="C")
 
-        data_index = cr_theta != outside_map_val
         self.lat = cr_theta
-        self.lat[data_index] = self.lat[data_index] - np.pi/2.
         self.lon = cr_phi
         self.mu = image_mu
         self.no_data_val = outside_map_val
@@ -184,12 +221,7 @@ class LosMagneto(LosImage):
         cr_lon = self.sunpy_meta['crln_obs']
 
         super().get_coordinates(R0=R0, cr_lat=cr_lat, cr_lon=cr_lon,
-                                outside_map_val=outside_map_val)
-        # get_coordinates() assumes solar-north-up to calc CR lat/lon. This is generally
-        # not true for raw HMI_M disks. Remove until disk rotation is incorporated into
-        # get_coordinates()
-        self.lat = None
-        self.lon = None
+                                outside_map_val=outside_map_val, helioproject=True)
 
     def add_Br(self, mu_thresh=0.01, R0=1.):
         """
@@ -304,6 +336,287 @@ def read_hmi720s(fits_file, make_map=False, solar_north_up=True):
                      sunpy_meta=rot_map.meta, make_map=make_map)
 
     return los
+
+
+class VectorMagneto(LosImage):
+    """
+    Class to hold the standard information for a vector magnetogram.
+    Created specifically to handle HMI B 720s data, this class is initially
+    designed to load the vector data-segments and use them to approximate
+    radial flux.
+
+    - Here the vector object is minimally described by:
+      data: a 2D numpy array of float values (line-of-sight for back-consistency).
+      x: a 1D array of the solar x positions of each pixel [Rs].
+      y: a 1D array of the solar y positions of each pixel [Rs].
+      field: a 2D numpy array of real values
+      azimuth: a 2D numpy array of real values
+      inclination: a 2D numpy array of real values
+      disambig: a 2D numpy array of uint8
+      conf_disambig: a 2D numpy array of uint8
+
+    - Additional optional fields and inputs
+      sunpy_meta: a dictionary of sunpy metadata
+        - This preserves compatibility with Sunpy and is useful for
+          visualizing or interacting with the data.
+      sunpy_cmap: Placeholder for a colormap. Sunpy commonly attaches the
+        'standard' colormap for an instrument when opening the FITS file.
+      make_map: if this is True then it will create a sunpy.map.Map object
+        under the 'map' tag
+    """
+
+    def __init__(self, data=None, x=None, y=None, field=None, azimuth=None,
+                 inclination=None, disambig=None, conf_disambig=None,
+                 sunpy_cmap=None, sunpy_meta=None, make_map=False,
+                 disambig_method=2):
+
+        pass_sunpy_meta = False
+        if sunpy_meta is not None:
+            # record the meta_data
+            self.sunpy_meta = sunpy_meta
+            # for back-compatibility, we add an 'info' attribute
+            self.info = dict(cr_lat=self.sunpy_meta['crlt_obs'],
+                             cr_lon=self.sunpy_meta['crln_obs'])
+            if make_map:
+                pass_sunpy_meta = True
+
+        # reference the base class .__init__()
+        if pass_sunpy_meta:
+            super().__init__(data, x, y, sunpy_cmap=sunpy_cmap, sunpy_meta=sunpy_meta)
+        else:
+            super().__init__(data, x, y, sunpy_cmap=sunpy_cmap)
+
+        self.field = field.astype(DTypes.LOS_DATA)
+        self.azimuth = azimuth.astype(DTypes.LOS_DATA)
+        self.inclination = inclination.astype(DTypes.LOS_DATA)
+        self.disambig = disambig.astype(DTypes.VEC_DISAMBIG)
+        self.conf_disambig = conf_disambig.astype(DTypes.VEC_DISAMBIG)
+        self.disambig_method = disambig_method
+
+        # any initial data attributes unique to VectorMagneto are setup here
+        self.Br = None
+
+    def get_coordinates(self, R0=1.0, outside_map_val=-65500., helio="CR"):
+        """
+        Calculate heliographic coordinates for each pixel.
+
+        This function produces Carrington latitude and longitude in radians as well
+        as cosine center-to-limb angle (mu).
+
+        Parameters
+        ----------
+        R0 - number of solar radii for spherical coords
+        outside_map_val - a value for pixel coordinates that fall outside of R0
+        helio - designate which heliographic coordinate system:
+            CR - Carrington or SH - Stonyhurst
+
+        Returns
+        -------
+        self with additional numpy.ndarray for each lat, lon, and mu attributes.
+        """
+        if helio=="CR":
+            cr_lat = self.sunpy_meta['crlt_obs']
+            cr_lon = self.sunpy_meta['crln_obs']
+        elif helio=="SH":
+            cr_lat = self.sunpy_meta['crlt_obs']
+            cr_lon = 0.
+
+        super().get_coordinates(R0=R0, cr_lat=cr_lat, cr_lon=cr_lon,
+                                outside_map_val=outside_map_val, helioproject=True)
+
+    def calc_Br(self, R0=1., los_scale=1.4, dil_its=5):
+        """
+
+        """
+        # first disambiguate the azimuth
+        disambig = self.disambig.copy()
+        disambig = np.floor(disambig / np.power(2., self.disambig_method))
+        disambig = disambig * 180
+        disambig_azi = self.azimuth.copy()
+        disambig_azi = disambig_azi + disambig
+        disambig_azi = disambig_azi % 360
+
+        # convert to radians
+        gamma = self.inclination * (np.pi/180.)
+        psi   = disambig_azi * (np.pi/180.)
+        # Calculate orthogonal components
+        sin_gamma = np.sin(gamma)
+        B_xi   = -self.field * sin_gamma * np.sin(psi)
+        B_eta  = self.field * sin_gamma * np.cos(psi)
+        B_zeta = self.field * np.cos(gamma)
+
+        # prep trig operations
+        c_lam = np.cos(self.lat)
+        s_lam = np.sin(self.lat)
+        b = self.info['cr_lat'] * np.pi/180.
+        s_b = np.sin(b)
+        c_b = np.cos(b)
+        p = -self.sunpy_meta['CROTA2'] * np.pi/180.
+        s_p = np.sin(p)
+        c_p = np.cos(p)
+        s_phi = np.sin(self.lon)
+        c_phi = np.cos(self.lon)
+
+        # Calc intermediate transform elements
+        k11 = c_lam*(s_b*s_p*c_phi + c_p*s_phi) - s_lam*c_b*s_p
+        k12 = -c_lam*(s_b*c_p*c_phi - s_p*s_phi) + s_lam*c_b*c_p
+        k13 = c_lam*c_b*c_phi + s_lam*s_b
+
+        # transform to Br
+        Br = k11*B_xi + k12*B_eta + k13*B_zeta
+
+        # mask based on conf_disambig
+        br_mask = self.conf_disambig >= 61
+        disk_mask = self.conf_disambig > 0
+        # now dilate the mask to smooth transitions
+        mask_weights = br_mask.astype(np.float16)
+        # Define a structuring element (e.g., 3x3 square)
+        structuring_element = np.ones((3, 3), dtype=bool)
+
+        for ii in range(1, dil_its):
+            # Apply dilation
+            br_mask = binary_dilation(br_mask, structure=structuring_element)
+            mask_weights = mask_weights + br_mask.astype(np.float16)
+
+        # average dilation totals
+        mask_weights = mask_weights/dil_its
+
+        # substitute LOS data where the vector data is uncertain
+        los_br = los_scale*self.data/self.mu
+
+        Br[disk_mask] = mask_weights[disk_mask]*Br[disk_mask] + \
+                        (1-mask_weights[disk_mask])*los_br[disk_mask]
+
+        self.Br = Br
+
+    def interp_to_map(self, R0=1.0, map_x=None, map_y=None, interp_field="Br", no_data_val=-65500.,
+                      image_num=None, nprocs=1, tpp=1, p_pool=None, y_cor=False, helio_proj=False):
+
+        if 'content' in self.sunpy_meta.keys():
+            if 'date_obs' in self.sunpy_meta.keys():
+                print("Converting " + self.sunpy_meta['telescop'] + "-" + str(
+                    self.sunpy_meta['content']) + " image from " +
+                      self.sunpy_meta['date_obs'] + " to a CR map.")
+            else:
+                print("Converting " + self.sunpy_meta['telescop'] + "-" + str(
+                    self.sunpy_meta['content']) + " image from " +
+                      self.sunpy_meta['date-obs'] + " to a CR map.")
+        else:
+            print("Converting " + self.sunpy_meta['telescop'] + " image from " +
+                  self.sunpy_meta['date-obs'] + " to a CR map.")
+
+        if map_x is None and map_y is None:
+            # Generate map grid based on number of image pixels horizontally within R0
+            # map parameters (assumed)
+            y_range = [-1, 1]
+            x_range = [0, 2 * np.pi]
+
+            # determine number of pixels in map x and y-grids
+            map_nxcoord = 2 * sum(abs(self.x) < R0)
+            map_nycoord = map_nxcoord / 2
+
+            # generate map x,y grids. y grid centered on equator, x referenced from lon=0
+            map_y = np.linspace(y_range[0], y_range[1], map_nycoord, dtype=DTypes.MAP_AXES)
+            map_x = np.linspace(x_range[0], x_range[1], map_nxcoord, dtype=DTypes.MAP_AXES)
+
+        if interp_field == "Br" and self.Br is None:
+            self.calc_Br(R0=R0)
+
+        # Do interpolation
+        interp_result = self.interp_data(R0, map_x, map_y, interp_field=interp_field, no_data_val=no_data_val,
+                                         nprocs=nprocs, tpp=tpp, p_pool=p_pool, y_cor=y_cor, helio_proj=helio_proj)
+
+        # check for NaNs and set to no_data_val
+        interp_result.data[np.isnan(interp_result.data)] = no_data_val
+
+        # Partially populate a map object with grid and data info
+        map_out = MagnetoMap(interp_result.data, interp_result.x, interp_result.y,
+                             mu=interp_result.mu_mat, no_data_val=no_data_val)
+
+        # transfer fits header information
+        if self.sunpy_meta is not None:
+            map_out.sunpy_meta = self.sunpy_meta
+
+        # construct map_info df to record basic map info
+        # map_info_df = pd.DataFrame(data=[[1, datetime.datetime.now()], ],
+        #                            columns=["n_images", "time_of_compute"])
+        # map_out.append_map_info(map_info_df)
+
+        return map_out
+
+
+def read_hmi720s_vector(fits_file, file_format='PSI', make_map=False):
+    """
+    Method for reading a set of HMI 720s vector FITS file to a VectorMagneto class.  This
+    includes a rotation to solar-north-up.
+    fits_file: path to a raw fits file for the 'field' segment.
+    make_map: boolean. Imbeds a sunpy.map object in the VectorMagneto object. This allows
+              many features, but is also redundant.
+    output: a VectorMagneto object.
+
+    """
+    # First create all file paths and check if the files exist
+    if not os.path.exists(fits_file):
+        print("Warning: Vector data not loaded. Field segment file does not exist at path: " +
+              fits_file)
+        return 1, None
+
+    azi_file = fits_file.replace("field", "azimuth")
+    if not os.path.exists(azi_file):
+        print("Warning: Vector data not loaded. Azimuth segment file does not exist at path: " +
+              azi_file)
+        return 1, None
+
+    inc_file = fits_file.replace("field", "inclination")
+    if not os.path.exists(inc_file):
+        print("Warning: Vector data not loaded. Inclination segment file does not exist at path: " +
+              inc_file)
+        return 1, None
+
+    dis_file = fits_file.replace("field", "disambig")
+    if not os.path.exists(dis_file):
+        print("Warning: Vector data not loaded. Disambiguation segment file does not exist at path: " +
+              dis_file)
+        return 1, None
+
+    mag_file = fits_file.replace("field", "magnetogram")
+    if file_format == 'nwra':
+        mag_file = mag_file.replace(".b_", ".m_")
+    if not os.path.exists(mag_file):
+        print("Warning: Vector data not loaded. M-series magnetogram file does not exist at path: " +
+              mag_file)
+        return 1, None
+
+    cdis_file = fits_file.replace("field", "conf_disambig")
+    if not os.path.exists(cdis_file):
+        print("Warning: Vector data not loaded. Disambiguation confidence segment file does not exist at path: " +
+              cdis_file)
+        return 1, None
+
+    # load data and header tuple into sunpy map type
+    map_field = sunpy.map.Map(fits_file)
+    # Open azimuth FITS file
+    azimuth, hdr = io_helpers.read_fits_image(azi_file)
+    # Open inclination FITS file
+    inclination, hdr = io_helpers.read_fits_image(inc_file)
+    # Open disambiguation FITS file
+    disambig, hdr = io_helpers.read_fits_image(dis_file)
+    # Open magnetogram FITS file
+    magnetogram, hdr = io_helpers.read_fits_image(mag_file)
+    # Open conf_disambig FITS file
+    conf_disambig, hdr = io_helpers.read_fits_image(cdis_file)
+
+    # create scales
+    x, y = prep.get_scales_from_fits(map_field.meta)
+
+    # create the object
+    vec = VectorMagneto(magnetogram, x, y, field=map_field.data,
+                        azimuth=azimuth, inclination=inclination,
+                        disambig=disambig, conf_disambig=conf_disambig,
+                        sunpy_cmap=map_field.cmap,
+                        sunpy_meta=map_field.meta, make_map=make_map)
+
+    return 0, vec
 
 
 class EUVImage(LosImage):

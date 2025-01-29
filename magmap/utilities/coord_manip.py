@@ -9,9 +9,6 @@ import multiprocessing as mp
 # change Pool default from 'fork' to 'spawn'
 # mp.set_start_method("spawn")
 
-import magmap.utilities.datatypes.datatypes as psi_dt
-# import astropy_healpix
-
 
 def c2s(x, y, z):
     """
@@ -82,7 +79,7 @@ def map_grid_to_image(map_x, map_y, R0=1.0, obsv_lon=0.0, obsv_lat=0.0, image_cr
     # generate rotation matrix (from Carrington to image solar-north-up)
     rot_mat1 = map_to_image_rot_mat(obsv_lon, obsv_lat)
     # generate rotation matrix (from image solar-north-up to image orientation)
-    rot_mat2 = snu_to_image_rot_mat(image_crota2)
+    rot_mat2 = image_rot_mat(image_crota2)
     # combine rotations
     rot_mat = np.matmul(rot_mat2, rot_mat1)
     # construct coordinate array
@@ -131,7 +128,7 @@ def map_grid_to_helioprojective(map_x, map_y, R0=1.0, obsv_lon=0.0, obsv_lat=0.0
     # generate rotation matrix (from Carrington to image solar-north-up)
     rot_mat1 = map_to_image_rot_mat(obsv_lon, obsv_lat)
     # generate rotation matrix (from image solar-north-up to image orientation)
-    rot_mat2 = snu_to_image_rot_mat(image_crota2)
+    rot_mat2 = image_rot_mat(image_crota2)
     # combine rotations
     rot_mat = np.matmul(rot_mat2, rot_mat1)
     # construct coordinate array
@@ -170,8 +167,8 @@ def image_grid_to_CR(image_x, image_y, R0=1.0, obsv_lat=0, obsv_lon=0, get_mu=Fa
     """
     Given vector coordinate pairs in solar radii units and the observer angles, transform to map coords.  This routine
     assumes the observer is 'far'-meaning that fore-shortening and apparent radius are ignored.
-    :param image_x: vector of x coordinates
-    :param image_y: vector of y coordinates
+    :param image_x: vector of x coordinates (solar radii)
+    :param image_y: vector of y coordinates (solar radii)
     :param R0: Assumed radius in solar radii.
     :param obsv_lat: Carrington latitude (degrees from equator) of observing instrument
     :param obsv_lon: Carrington longitude (degrees) of observing instrument
@@ -203,9 +200,8 @@ def image_grid_to_CR(image_x, image_y, R0=1.0, obsv_lat=0, obsv_lon=0, get_mu=Fa
     rot_mat = map_to_image_rot_mat(obsv_lon, obsv_lat)
     # invert/transpose for image-to-map rotation matrix
     rev_rot = rot_mat.transpose()
-    # generate rotation matrix (from image solar-north-up to image orientation)
-    rot_mat2 = snu_to_image_rot_mat(crota2)
-    # invert for image-to-snu
+    # generate rotation matrix (from image orientation to solar-north-up )
+    rot_mat2 = image_rot_mat(crota2, counterclock=-1)
     # construct coordinate array
     coord_array = np.array([use_x, use_y, use_z])
     # apply rotation matrix to coordinates
@@ -216,6 +212,99 @@ def image_grid_to_CR(image_x, image_y, R0=1.0, obsv_lat=0, obsv_lon=0, get_mu=Fa
     map3D_coord[2, num_err_z_index] = np.sign(map3D_coord[2, num_err_z_index]) * R0
     # Convert map cartesian to map theta and phi
     cr_theta = np.arccos(map3D_coord[2, :] / R0)
+    cr_phi = np.arctan2(map3D_coord[1, :], map3D_coord[0, :])
+    # Change phi range from [-pi,pi] to [0,2pi]
+    neg_phi = cr_phi < 0
+    cr_phi[neg_phi] = cr_phi[neg_phi] + 2 * np.pi
+
+    cr_theta_all = np.full(image_x.shape, outside_map_val)
+    cr_phi_all = np.full(image_x.shape, outside_map_val)
+
+    cr_theta_all[use_index] = cr_theta
+    cr_phi_all[use_index] = cr_phi
+
+    if get_mu:
+        return cr_theta_all, cr_phi_all, image_mu
+    else:
+        return cr_theta_all, cr_phi_all, None
+
+
+def image_helioproject_to_CR(image_x, image_y, D0, R0=1.0, obsv_lat=0, obsv_lon=0, get_mu=False, outside_map_val=-9999.,
+                             crota2=0.):
+    """
+    Given vector coordinate pairs in observer arc-seconds and the observer angles, transform to heliographic CR.
+    :param image_x: vector of x coordinates (arcsec)
+    :param image_y: vector of y coordinates (arcsec)
+    :param R0: Assumed radius in solar radii.
+    :param D0: Observer-to-solar center distance (solar radii)
+    :param obsv_lat: Carrington latitude (degrees from equator) of observing instrument
+    :param obsv_lon: Carrington longitude (degrees) of observing instrument
+    :param crota2: Image-plane counterclockwise rotation needed for solar-north-up (degrees)
+    :return:
+    """
+
+    # for images, we assume that the z-axis is perpendicular to the image plane, in the direction
+    # of the observer, and located at the center of the image.
+
+    # Pre-calculate trig functions
+    cty = np.cos(image_y)
+    ctx = np.cos(image_x)
+    sty = np.sin(image_y)
+    stx = np.sin(image_x)
+    ctx2 = ctx ** 2
+    cty2 = cty ** 2
+    stx2 = stx ** 2
+    sty2 = sty ** 2
+
+    # Calculate the value under the square-root (quadratic formula for 'd')
+    # NOTE: Helioprojective cartesian to heliocentric cartesian: z = D0 - d*cty*ctx
+    #    replace z with z = sqrt(R0^2 - x^2 - y^2)
+    #    solve quadratic for 'd' and simplify
+    #    resulting equation is of the form d = (d_quad_a - sqrt(d_quad_sqrt))/d_quad_a
+    d_quad_sqrt = -D0**2 * (cty2*stx2 + sty2) + R0**2 * (cty2*ctx2 + cty2*stx2 + sty2)
+    # If this value is negative, we are off the solar surface
+    use_index = d_quad_sqrt >= 0.
+
+    # mask points outside of R0
+    d_quad_sqrt = d_quad_sqrt[use_index]
+
+    # complete calculation of 'd'
+    d_quad_b = D0*cty[use_index]*ctx[use_index]
+    d_quad_a = cty2[use_index]*ctx2[use_index] + cty2[use_index]*stx2[use_index] + sty2[use_index]
+    d = (d_quad_b - np.sqrt(d_quad_sqrt))/d_quad_a
+
+    # Calculate heliocentric cartesian (observer-up z+)
+    use_x = d * cty[use_index] * stx[use_index]
+    use_y = d * sty[use_index]
+    use_z = D0 - d*cty[use_index]*ctx[use_index]
+
+    # Calc image_theta, image_phi, and image_mu
+    if get_mu:
+        image_mu = np.full(image_x.shape, outside_map_val)
+        # image_phi = np.arctan2(image_y, image_x)
+        use_theta = np.arccos(use_z / R0)
+        image_mu[use_index] = np.cos(use_theta)
+
+    # generate map-to-image rotation matrix
+    rot_mat = map_to_image_rot_mat(obsv_lon, obsv_lat)
+    # invert/transpose for image-to-map rotation matrix
+    rev_rot = rot_mat.transpose()
+    # generate rotation matrix (from image orientation to solar-north-up )
+    rot_img = image_rot_mat(crota2, counterclock=-1)
+    # construct coordinate array
+    coord_array = np.array([use_x, use_y, use_z])
+    # combine rotation matrices
+    tot_rot = np.matmul(rev_rot, rot_img)
+    # tot_rot = np.matmul(rot_img, rev_rot)
+    map3D_coord = np.matmul(tot_rot, coord_array)
+
+    # Occasionally numeric error from the rotation causes a z magnitude to be greater than R0
+    num_err_z_index = np.abs(map3D_coord[2, :]) > R0
+    map3D_coord[2, num_err_z_index] = np.sign(map3D_coord[2, num_err_z_index]) * R0
+    # Convert map cartesian to map theta and phi
+    cr_theta = np.arccos(map3D_coord[2, :] / R0)
+    # Change latitude reference from north pole (colatitude) to equator (geodetic)
+    cr_theta = np.pi/2 - cr_theta
     cr_phi = np.arctan2(map3D_coord[1, :], map3D_coord[0, :])
     # Change phi range from [-pi,pi] to [0,2pi]
     neg_phi = cr_phi < 0
@@ -306,6 +395,9 @@ def interpolate2D_regular2irregular_parallel(reg_x, reg_y, reg_vals, eval_x, eva
 
 def interp_los_image_to_map(image_in, R0, map_x, map_y, no_data_val=-9999., interp_field="data",
                             nprocs=1, tpp=1, p_pool=None, helio_proj=False):
+    # import statement is inside function to avoid circular import at initialization
+    import magmap.utilities.datatypes.datatypes as psi_dt
+
     map_nxcoord = len(map_x)
     map_nycoord = len(map_y)
 
@@ -410,6 +502,9 @@ def interp_los_image_to_map(image_in, R0, map_x, map_y, no_data_val=-9999., inte
 
 def interp_los_image_to_map_par(image_in, R0, map_x, map_y, no_data_val=-9999., interp_field="data",
                                 nprocs=1, tpp=1, p_pool=None, helio_proj=False):
+    # import statement is inside function to avoid circular import at initialization
+    import magmap.utilities.datatypes.datatypes as psi_dt
+
     map_nxcoord = len(map_x)
     map_nycoord = len(map_y)
 
@@ -542,12 +637,12 @@ def map_to_image_rot_mat(obsv_lon, obsv_lat):
     # int3D_y = np.cos(del_phi)*map3D_y + np.sin(del_phi)*map3D_x
     # int3D_z = map3D_z
 
-    # rotate phi (about map z-axis. observer phi goes to -y)
+    # rotate phi (about map z-axis. map +x goes to observer lon + pi/2)
     del_phi = -obsv_lon * np.pi / 180 - np.pi / 2
     rot1 = np.array([[np.cos(del_phi), -np.sin(del_phi), 0.],
                      [np.sin(del_phi), np.cos(del_phi), 0.], [0., 0., 1.], ])
 
-    # rotate theta (about x-axis. observer theta goes to +z)
+    # rotate theta (about x-axis. map +z goes observer lat + pi/2)
     del_theta = obsv_lat * np.pi / 180 - np.pi / 2
     rot2 = np.array([[1., 0., 0.], [0., np.cos(del_theta), -np.sin(del_theta)],
                      [0., np.sin(del_theta), np.cos(del_theta)]])
@@ -556,7 +651,30 @@ def map_to_image_rot_mat(obsv_lon, obsv_lat):
 
     return tot_rot
 
-def snu_to_image_rot_mat(crota2):
+
+def obsv_to_map_rot_mat(obsv_lon, obsv_lat):
+    # initial orientation is
+    #    +x - observer right
+    #    +y - observer up
+    #    +z - out of disk, toward observer
+
+    # rotate theta (about observer x-axis. observer +z goes to obsv_lat, this also requires
+    # a pi/2 shift 'up'—clockwise about +x)
+    del_theta = -obsv_lat * np.pi/180 + np.pi/2
+    rot1 = np.array([[1., 0., 0.], [0., np.cos(del_theta), -np.sin(del_theta)],
+                     [0., np.sin(del_theta), np.cos(del_theta)]])
+
+    # rotate phi (about map z-axis. observer +x goes to CR_lon=0 - pi/2)
+    del_phi = obsv_lon*np.pi/180 + np.pi/2
+    rot2 = np.array([[np.cos(del_phi), -np.sin(del_phi), 0.],
+                     [np.sin(del_phi), np.cos(del_phi), 0.], [0., 0., 1.], ])
+
+    tot_rot = np.matmul(rot2, rot1)
+
+    return tot_rot
+
+
+def image_rot_mat(crota2, counterclock=1):
     # Use the 'crota2' parameter (degrees counterclockwise) from fits metadata to rotate points
     # from solar-north-up (snu) to image orientation.
     # Assumes that we are in 3-D image-coordinates and rotating about
@@ -565,6 +683,8 @@ def snu_to_image_rot_mat(crota2):
     # that the image-space vertical axis is 'y' and increases up.  Positive z-axis is toward
     # the observer.
 
+    # counterclock: default rotation is counterclockwise [1].  Set to -1 for clockwise.
+
     # From Thompson, 2005: Coordinate systems for solar image data
     # rot_mat =  cos(CROTA)  -sin(CROTA)
     #            sin(CROTA)   cos(CROTA)
@@ -572,8 +692,8 @@ def snu_to_image_rot_mat(crota2):
 
     # convert to radians
     crota_rad = np.pi*crota2/180
-    rot_mat = np.array([[np.cos(crota_rad), np.sin(crota_rad), 0.],
-                        [-np.sin(crota_rad), np.cos(crota_rad), 0.],
+    rot_mat = np.array([[np.cos(crota_rad), counterclock*np.sin(crota_rad), 0.],
+                        [counterclock*-np.sin(crota_rad), np.cos(crota_rad), 0.],
                         [0., 0., 1.]])
     # rot_mat = np.array([[np.cos(crota_rad), -np.sin(crota_rad), 0.],
     #                     [np.sin(crota_rad), np.cos(crota_rad), 0.],
@@ -583,6 +703,9 @@ def snu_to_image_rot_mat(crota2):
 
 def interp_los_image_to_map_jitter_test(image_in, R0, map_x, map_y, no_data_val=-9999., interp_field="data",
                                         nprocs=1, tpp=1, p_pool=None):
+    # import statement is inside function to avoid circular import at initialization
+    import magmap.utilities.datatypes.datatypes as psi_dt
+
     map_nxcoord = len(map_x)
     map_nycoord = len(map_y)
 

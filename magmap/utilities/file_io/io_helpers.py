@@ -145,15 +145,66 @@ def uncompress_compressed_fits_image(infile, outfile, int=False):
     hdu.writeto(outfile, output_verify='silentfix', overwrite=True, checksum=True)
 
 
-def read_uncompressed_fits_image(infile):
+def read_fits_image(infile, nan_value=None, **kwargs):
     """
-    read an uncompressed fits file and return the data and header
+    Read a fits image file and return the data and header. This is a wrapper the readers for
+    compressed or uncompressed FITS files.
+
     - The silentfix is to avoid warnings/and or crashes when astropy encounters nans in the header values
+
+    NOTE: The check for compressed vs. uncompressed is kind of sketchy and based on files I had on hand.
+          - This might need to be properly fixed later.
+    ToDo: Make the compressed vs. uncompressed checking more robust.
     """
     hdulist = astropy.io.fits.open(infile)
     hdulist.verify('silentfix')
+
+    # if only one element read it as uncompressed (not sure this happens?).
+    if len(hdulist) == 1:
+        data, hdr = read_uncompressed_fits_hdu(hdulist)
+
+    # check if it is compressed or uncompressed.
+    else:
+        if len(hdulist) == 2 and isinstance(hdulist[1], astropy.io.fits.hdu.compressed.CompImageHDU):
+            data, hdr = read_compressed_fits_hdu(hdulist, **kwargs)
+        else:
+            data, hdr = read_uncompressed_fits_hdu(hdulist)
+
+    # if a nan_value has been set, remove it here (since those can sometimes slow stuff down later).
+    if nan_value is not None:
+        data = np.where(np.isnan(data), nan_value, data)
+
+    return data, hdr
+
+
+def read_uncompressed_fits_hdu(hdulist):
+    """
+    Parse an uncompressed fits hdulist and return the data and header. This assumes the image is the
+    first item in the hdulist.
+    """
     hdr = hdulist[0].header
     data = hdulist[0].data
+
+    return data, hdr
+
+
+def read_compressed_fits_hdu(hdulist, int=False):
+    """
+    Parse a compressed SDO-style fits hdulist (1 compressed image) and return the data and header.
+    """
+    # check that it is a compressed image by looking at the length of the hdulist
+    if len(hdulist) != 2:
+        hdulist.info()
+        raise Exception("This FITS file does not look like a simple compressed image!")
+
+    hdr = hdulist[1].header
+
+    # By default Astropy will convert the compressed data to float64
+    data = hdulist[1].data
+
+    # for some files (e.g. un-prepped STEREO you might want unsigned integer)
+    if int:
+        data = data.astype(np.uint16)
 
     return data, hdr
 
