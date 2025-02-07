@@ -287,7 +287,8 @@ class HMI_M720s:
         # return key_frame, seg_frame
         return data_frame
 
-    def download_image_fixed_format(self, data_series, base_dir, update=True, overwrite=False, verbose=False):
+    def download_image_fixed_format(self, data_series, base_dir, suffix="",
+                                    update=True, overwrite=False, verbose=False):
         """
         supply a row from a custom pandas data_frame and use this info to download the HMI image.
         (a pandas series is a row of a dataframe, so these are basically
@@ -309,7 +310,7 @@ class HMI_M720s:
         ).datetime
         prefix = '_'.join(self.series.split('.'))
         # postfix = str(data_series['filter'])
-        postfix = ''
+        postfix = suffix
         ext = 'fits'
         dir, fname = io_helpers.construct_path_and_fname(base_dir, image_datetime, prefix, postfix, ext)
         fpath = dir + os.sep + fname
@@ -332,6 +333,7 @@ class HMI_M720s:
             drms_query = data_series.to_frame().T
             self.update_hmi_fits_header(fpath, drms_query, verbose=False)
 
+        print("")
         # now separate the the sub directory from the base path (i want relative path for the DB)
         sub_dir = os.path.sep.join(dir.split(base_dir)[1].split(os.path.sep)[1:])
 
@@ -344,9 +346,9 @@ class HMI_B720s:
     - On initialization it sets up a client that will be used to work with this data
     """
 
-    def __init__(self, verbose=False):
+    def __init__(self, verbose=False, filters=None):
 
-        self.series = 'hmi.m_720s'
+        self.series = 'hmi.b_720s'
 
         # initialize the drms client
         self.client = drms.Client()
@@ -366,7 +368,7 @@ class HMI_B720s:
         # self.default_filters = ['CAMERA=1', 'QUALITY=0']
 
         # default segments for a query
-        self.default_segments = ['magnetogram']
+        self.default_segments = ["field", "inclination", "disambig", "azimuth", "conf_disambig"]
 
         # header items that change from "as-is" to "fits" formats served by JSOC.
         self.hdr_keys_to_delete = ['SOURCE', ]
@@ -376,6 +378,9 @@ class HMI_B720s:
 
         if verbose:
             print('### Initialized DRMS client for ' + self.series)
+
+        if filters is not None:
+            self.default_filters = filters
 
     def update_hmi_fits_header(self, infile, drms_query, verbose=False, force=False):
         """
@@ -411,14 +416,16 @@ class HMI_B720s:
         """
         supply a single row from the result of query_time_interval(),
         obtain the full JSOC info as a pandas frame from drms
-        The prime key syntax for hmi.m_720s is used here
+        This is modeled off the HMI_M720s function, but with the following changes:
+          - The camera portion of the query is removed (because it is not part of the
+            HMI_B720s query format.
         """
-        query_string = '%s[%s_TAI][%s]'%(self.series, init_query.time.iloc[0], init_query.camera.iloc[0])
+        query_string = '%s[%s_TAI]'%(self.series, init_query.time.iloc[0])
         drms_frame = self.client.query(query_string, key="**ALL**")
         # remove unwanted fields
         all_cols = set(drms_frame.keys())
         keep_cols = all_cols.difference(set(self.hdr_keys_to_delete))
-        drms_frame = drms_frame.loc[:, keep_cols]
+        drms_frame = drms_frame.loc[:, list(keep_cols)]
 
         return drms_frame
 
@@ -483,7 +490,12 @@ class HMI_B720s:
             # Check for adding a key that doesn't exist.
             elif fits_key in self.hdr_keys_to_add or (len(self.hdr_keys_to_add) == 1
                                                       and self.hdr_keys_to_add[0] == "ALL"):
-                hdr[fits_key] = drms_frame[pandas_key][0]
+                # Keywords are required to be 8 characters or less by FITS standards
+                # Auto-abbreviating keywords is not something we want to do.  Assume
+                # longer keywords from the database are not standard FITS values and
+                # exclude.
+                if len(fits_key) <= 8:
+                    hdr[fits_key] = drms_frame[pandas_key][0]
 
             # Check if the key is missing from the file and wasn't supposed to be added.
             else:
@@ -565,24 +577,30 @@ class HMI_B720s:
 
         if len(seg_frame) == 0:
             # No results were found for this time range. generate empty Dataframe to return
-            data_frame = pd.DataFrame(columns=('spacecraft', 'instrument', 'camera', 'filter', 'time', 'jd', 'url'))
+            data_frame = pd.DataFrame(columns=('spacecraft', 'instrument', 'camera', 'filter', 'time', 'jd')
+                                              + tuple(segments))
             return data_frame
 
         # parse the results a bit
         time_strings, jds = parse_query_times(key_frame, time_type='tai')
-        urls = jsoc_url + seg_frame['magnetogram']
+        # urls = jsoc_url + seg_frame['magnetogram']
 
         # make the custom dataframe with the info i want
         # data_frame = io_helpers.custom_dataframe(time_strings, jds, urls, 'SDO', 'HMI')
         data_frame = pd.DataFrame(
             OrderedDict({'spacecraft': 'SDO', 'instrument': 'HMI', 'camera': key_frame.CAMERA,
-                         'filters': filter_str, 'time': time_strings, 'jd': jds, 'url': urls})
+                         'filters': filter_str, 'time': time_strings, 'jd': jds})
         )
+        # add segment urls to data frame
+        for seg in segments:
+            data_frame[seg] = jsoc_url + seg_frame[seg]
 
         # return key_frame, seg_frame
         return data_frame
 
-    def download_image_fixed_format(self, data_series, base_dir, update=True, overwrite=False, verbose=False):
+    def download_image_fixed_format(self, data_series, base_dir,
+                                    segments=['field', 'inclination', 'disambig', 'azimuth', 'conf_disambig'],
+                                    update=True, overwrite=False, verbose=False):
         """
         supply a row from a custom pandas data_frame and use this info to download the HMI image.
         (a pandas series is a row of a dataframe, so these are basically
@@ -594,43 +612,99 @@ class HMI_B720s:
         if len(data_series.shape) != 1:
             raise RuntimeError('data_series has more than one row!')
 
-        # build the url
-        url = data_series['url']
+        # initialize fname and exit_flag
+        nsegs = len(segments)
+        fname = np.full((nsegs, ), '', dtype=str)
+        exit_flag = np.full((nsegs, ), 0, dtype=int)
 
-        # build the filename and subdir from the series, timestamp, and wavelength information
-        # image_datetime = astropy.time.Time(data_series['time'], scale='tai').datetime
-        image_datetime = astropy.time.Time.strptime(
-            data_series['time'], format_string="%Y.%m.%d_%H:%M:%S", scale='tai'
-        ).datetime
-        prefix = '_'.join(self.series.split('.'))
-        # postfix = str(data_series['filter'])
-        postfix = ''
-        ext = 'fits'
-        dir, fname = io_helpers.construct_path_and_fname(base_dir, image_datetime, prefix, postfix, ext)
-        fpath = dir + os.sep + fname
+        # loop through segments
+        for ii in range(nsegs):
+            seg = segments[ii]
+            # extract the url
+            url = data_series[seg]
 
-        # download the file
-        exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+            # build the filename and subdir from the series, timestamp, and wavelength information
+            # image_datetime = astropy.time.Time(data_series['time'], scale='tai').datetime
+            image_datetime = astropy.time.Time.strptime(
+                data_series['time'], format_string="%Y.%m.%d_%H:%M:%S", scale='tai'
+            ).datetime
+            prefix = '_'.join(self.series.split('.'))
+            # postfix = str(data_series['filter'])
+            postfix = seg
+            ext = 'fits'
+            dir, seg_fname = io_helpers.construct_path_and_fname(base_dir, image_datetime, prefix, postfix, ext)
+            fpath = dir + os.sep + seg_fname
 
-        if exit_flag == 1:
-            # There was an error with download. Try again
-            print(" Re-trying download....")
-            exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
-            if exit_flag == 1:
-                # Download failed. Return None
-                return None, None, exit_flag
+            # download the file
+            seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
 
-        # update the header info if desired
-        if update:
-            if verbose:
-                print('  Updating header info if necessary.')
-            drms_query = data_series.to_frame().T
-            self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+            if seg_exit_flag == 1:
+                # There was an error with download. Try again
+                print(" Re-trying download....")
+                seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+                if seg_exit_flag == 1:
+                    print(" Download of " + seg + " failed. Skipping remaining segments.")
+                    # Download failed. Exit for-loop and do clean-up
+                    exit_flag[ii] = seg_exit_flag
+                    break
 
-        # now separate the the sub directory from the base path (i want relative path for the DB)
+            # update the header info if desired
+            if update:
+                if verbose:
+                    print('  Updating header info if necessary.')
+                drms_query = data_series.to_frame().T
+                self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+
+            # record fname and exit flag
+            fname[ii] = seg_fname
+            exit_flag[ii] = seg_exit_flag
+
+        print("")
+        # now separate the sub directory from the base path (i want relative path for the DB)
         sub_dir = os.path.sep.join(dir.split(base_dir)[1].split(os.path.sep)[1:])
 
         return sub_dir, fname, exit_flag
+
+
+    def cleanup_download_image_fixed(self, data_series, base_dir,
+                                    segments=['field', 'inclination', 'disambig', 'azimuth', 'conf_disambig']):
+        """
+        When not all segments download successfully, delete remaining segments.
+        supply a row from a custom pandas data_frame and use this info to delete the HMI image(s).
+        (a pandas series is a row of a dataframe, so these are basically
+        the single image results from the query)
+        - you can obtain these by doing data_framge = key=keys.iloc[row_index]
+        The sub_path and filename are determined from the image information
+        exit_flag: 0-Successful download; 1-download error; 2-file already exists
+        """
+        if len(data_series.shape) != 1:
+            raise RuntimeError('data_series has more than one row!')
+
+        # initialize fname and exit_flag
+        nsegs = len(segments)
+
+        # loop through segments
+        for ii in range(nsegs):
+            seg = segments[ii]
+
+            # build the filename and subdir from the series, timestamp, and wavelength information
+            # image_datetime = astropy.time.Time(data_series['time'], scale='tai').datetime
+            image_datetime = astropy.time.Time.strptime(
+                data_series['time'], format_string="%Y.%m.%d_%H:%M:%S", scale='tai'
+            ).datetime
+            prefix = '_'.join(self.series.split('.'))
+            # postfix = str(data_series['filter'])
+            postfix = seg
+            ext = 'fits'
+            dir, seg_fname = io_helpers.construct_path_and_fname(base_dir, image_datetime, prefix, postfix, ext)
+            fpath = dir + os.sep + seg_fname
+
+            # delete the file
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+                print(f"{fpath} deleted successfully.")
+
+        return
 
 
 class HMI_Mrmap_latlon_720s:
@@ -983,9 +1057,9 @@ def parse_query_times(key_frame, time_type='utc'):
     return time_strings, jds
 
 
-if __name__ == "__main__":
-    s12 = S12(verbose=True)
-    print('  series: ' + s12.series)
-    print('  default keys:', s12.default_keys)
-    print('  default filters:', s12.default_filters)
-    print('  default segments:', s12.default_segments)
+# if __name__ == "__main__":
+#     s12 = S12(verbose=True)
+#     print('  series: ' + s12.series)
+#     print('  default keys:', s12.default_keys)
+#     print('  default filters:', s12.default_filters)
+#     print('  default segments:', s12.default_segments)
