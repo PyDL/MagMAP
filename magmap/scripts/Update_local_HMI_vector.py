@@ -39,6 +39,9 @@ segments_B = ["field", "inclination", "disambig", "azimuth", "conf_disambig"]
 interval_cadence = datetime.timedelta(hours=1)
 del_interval = datetime.timedelta(minutes=20)
 target_minute = 48
+# set these to None for automatic updates
+fixed_period_start = None
+fixed_period_end = datetime.datetime(2024, 2, 1, 1, target_minute, 0, tzinfo=datetime.timezone.utc)
 
 # index file name
 index_file = "all-files.csv"
@@ -51,14 +54,14 @@ if robust:
     available_raw_B = io_helpers.read_db_dir(raw_dirname_B)
 else:
     available_raw_B = pd.read_csv(raw_dirname_B + os.sep + "index_files" + os.sep + index_file)
-    available_raw_B['date'] = pd.to_datetime(available_raw_B['date'], format='%Y-%m-%dT%H:%M:%S')
+    available_raw_B['date'] = pd.to_datetime(available_raw_B['date'], format='%Y-%m-%dT%H:%M:%S',
+                                             utc=True)
 
 # define date range to search
 # initial time
 if len(available_raw_B) > 0:
     # determine most recent data
-    data_end = available_raw_B.date.max().to_pydatetime()
-    period_start = data_end + interval_cadence
+    period_start = available_raw_B.date.max().to_pydatetime()
 else:
     period_start = datetime.datetime(2010, 5, 1, 0, target_minute, 0, tzinfo=datetime.timezone.utc)
 
@@ -67,9 +70,12 @@ else:
 
 # ending time
 period_end = datetime.datetime.now(datetime.timezone.utc)
-# debug
-period_start = datetime.datetime(2024, 1, 1, 0, target_minute, 0, tzinfo=datetime.timezone.utc)
-period_end = datetime.datetime(2024, 2, 1, 1, target_minute, 0, tzinfo=datetime.timezone.utc)
+
+# override with fixed period datetimes
+if fixed_period_start is not None:
+    period_start = fixed_period_start
+if fixed_period_end is not None:
+    period_end = fixed_period_end
 
 period_range = [period_start, period_end]
 
@@ -81,7 +87,7 @@ else:
 rounded_start = period_start.replace(second=0, microsecond=0, minute=target_minute, hour=period_start.hour) + \
                 datetime.timedelta(hours=period_start.minute//tm_comp - 1)
 target_times = pd.date_range(start=rounded_start, end=period_end, freq=interval_cadence).to_pydatetime()
-query_range = [period_start-del_interval, period_end+del_interval]
+query_range = [target_times[0]-del_interval, target_times[-1]+del_interval]
 
 # initialize the helper class for HMI
 hmi = drms_helpers.HMI_M720s(verbose=True, series=seriesM, filters=filters_M)
@@ -136,12 +142,14 @@ for index, row in match_times.iterrows():
         )
 
         # download resulting vector segments
+        print(f'Acquiring HMI-B data for time: {los_row.time}, quality: {los_row.quality}')
         sub_dir_b, fname_b, exit_flag_b = hmi_vec.download_image_fixed_format(
             data_series=vec_row, base_dir=raw_dirname_B, segments=segments_B,
             update=True, overwrite=False, verbose=True
         )
         if any(exit_flag_b != 0):
             # If not all segments downloaded successfully, clean-up the remainder
+            print("Cleaning-up any partial segment files for this timestamp.")
             hmi_vec.cleanup_download_image_fixed(data_series=vec_row, base_dir=raw_dirname_B,
                                                  segments=segments_B+["magnetogram", ])
 

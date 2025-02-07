@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 from http.client import HTTPException
 from collections import OrderedDict
+import requests
+import time
 
 from magmap.utilities.file_io import io_helpers
 
@@ -403,13 +405,19 @@ class HMI_B720s:
         # get the corresponding header info from the JSOC as a drms frame
         drms_frame = self.get_drms_info_for_image(drms_query)
 
-        # update the header info
-        hdr_update = self.update_header_fields_from_drms(hdr, drms_frame,
-                                                         verbose=verbose)
+        if drms_frame is not None:
+            # update the header info
+            hdr_update = self.update_header_fields_from_drms(hdr, drms_frame,
+                                                             verbose=verbose)
+            # update header and close
+            hdu_in[1].header = hdr_update
+            update_flag = 0
+        else:
+            update_flag = 1
 
-        # update header and close
-        hdu_in[1].header = hdr_update
         hdu_in.close()
+
+        return update_flag
 
 
     def get_drms_info_for_image(self, init_query):
@@ -421,11 +429,15 @@ class HMI_B720s:
             HMI_B720s query format.
         """
         query_string = '%s[%s_TAI]'%(self.series, init_query.time.iloc[0])
-        drms_frame = self.client.query(query_string, key="**ALL**")
-        # remove unwanted fields
-        all_cols = set(drms_frame.keys())
-        keep_cols = all_cols.difference(set(self.hdr_keys_to_delete))
-        drms_frame = drms_frame.loc[:, list(keep_cols)]
+        # drms_frame = self.client.query(query_string, key="**ALL**")
+        drms_frame = drms_query_with_retry(self, query_string, keys="**ALL**",
+                                           max_retries=5, delay=2)
+
+        if drms_frame is not None:
+            # remove unwanted fields
+            all_cols = set(drms_frame.keys())
+            keep_cols = all_cols.difference(set(self.hdr_keys_to_delete))
+            drms_frame = drms_frame.loc[:, list(keep_cols)]
 
         return drms_frame
 
@@ -636,24 +648,30 @@ class HMI_B720s:
             fpath = dir + os.sep + seg_fname
 
             # download the file
-            seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+            # seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+            seg_exit_flag = io_helpers.download_url_with_requests(url, fpath, max_retries=5, delay=2,
+                                                                  verbose=verbose, overwrite=overwrite)
 
+            # if seg_exit_flag == 1:
+            #     # There was an error with download. Try again
+            #     print(" Re-trying download....")
+            #     seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
             if seg_exit_flag == 1:
-                # There was an error with download. Try again
-                print(" Re-trying download....")
-                seg_exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
-                if seg_exit_flag == 1:
-                    print(" Download of " + seg + " failed. Skipping remaining segments.")
-                    # Download failed. Exit for-loop and do clean-up
-                    exit_flag[ii] = seg_exit_flag
-                    break
+                print(" Download of " + seg + " failed. Skipping remaining segments.")
+                # Download failed. Exit for-loop and do clean-up
+                exit_flag[ii] = seg_exit_flag
+                break
 
             # update the header info if desired
             if update:
                 if verbose:
                     print('  Updating header info if necessary.')
                 drms_query = data_series.to_frame().T
-                self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+                update_flag = self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+                if update_flag == 1:
+                    print(" Header update of " + seg + " failed. Skipping remaining segments.")
+                    exit_flag[ii] = update_flag
+                    break
 
             # record fname and exit flag
             fname[ii] = seg_fname
@@ -1056,6 +1074,51 @@ def parse_query_times(key_frame, time_type='utc'):
 
     return time_strings, jds
 
+
+def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2, **kwargs):
+    """
+    Execute a DRMS query with retry logic on timeout or connection failure.
+
+    Parameters:
+        client (drms.Client): The DRMS client.
+        query_string (str): Data series name (e.g., "hmi.M_720s") and basic query.
+        keys (str or list): Query parameters.
+        max_retries (int): Number of retry attempts.
+        delay (int): Seconds to wait between retries.
+        **kwargs: Additional arguments for drms.Client.query().
+
+    Returns:
+        pandas.DataFrame or None: Query result if successful, None if failed.
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            print(f"Attempt {attempt + 1}: DRMS query {query_string}")
+
+            # Perform the DRMS query
+            result = client.query(query_string, key=keys, **kwargs)
+
+            print("Query successful.")
+            return result  # Return the successful result
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            print(f"Network error: {e}. Retrying in {delay} seconds...")
+
+        except drms.DrmsExportError as e:
+            print(f"DRMS Export Error: {e}. Retrying in {delay} seconds...")
+
+        except drms.DrmsQueryError as e:
+            print(f"DRMS Query Error: {e}. Retrying in {delay} seconds...")
+
+        # Generic exception handling (use cautiously)
+        except Exception as e:
+            print(f"Unexpected error: {e}. Retrying in {delay} seconds...")
+
+        attempt += 1
+        time.sleep(delay)
+
+    print("Max retries reached. Query failed.")
+    return None  # Return None if the query never succeeds
 
 # if __name__ == "__main__":
 #     s12 = S12(verbose=True)

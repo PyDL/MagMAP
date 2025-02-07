@@ -6,6 +6,8 @@ Includes routines for downloading, organizing, and manipulating FITS files.
 These might be split up into different modules later.
 """
 import re
+import requests
+import time
 
 from six.moves.urllib.request import urlretrieve
 from six.moves.urllib.error import HTTPError, URLError
@@ -16,6 +18,50 @@ import astropy.time as astro_time
 import numpy as np
 import sunpy.coordinates.sun
 
+
+def download_url_with_requests(url, fpath, max_retries=5, delay=2, overwrite=False, verbose=True):
+    """
+        Quick function to download a file specified by a url. Unlike previous function,
+        this uses the 'requests' library.
+        - If file downloaded, this returns 0
+        - If download error, this returns 1
+        - If file already exists (no overwrite), this returns 2
+        - If file already exists (overwrite), this returns 3
+        """
+
+    exit_flag = 0
+    # check if the file exists first
+    if os.path.isfile(fpath):
+        if not overwrite:
+            print("    " + fpath + " exists! SKIPPING!")
+            return 2
+        else:
+            print("    " + fpath + " exists! OVERWRITING!")
+            exit_flag = 3
+
+    attempt = 0
+    if verbose:
+        print('### Downloading file:')
+        print('  url:  ' + url)
+        print('  path: ' + fpath)
+    while attempt < max_retries:
+        try:
+            print(f"Attempt {attempt + 1}: ...")
+            response = requests.get(url, timeout=2)  # 2-second timeout
+            response.raise_for_status()  # Raise error for HTTP issues
+            with open(fpath, 'wb') as f:
+                f.write(response.content)
+            print("Download successful.")
+            return 0
+        except requests.exceptions.Timeout:
+            print(f"TimeoutError: Attempt {attempt + 1} failed. Retrying in {delay} seconds...")
+            attempt += 1
+            time.sleep(delay)
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return 1
+    print("Max retries reached. Download failed.")
+    return 1
 
 def download_url(url, fpath, overwrite=False, verbose=True):
     """
