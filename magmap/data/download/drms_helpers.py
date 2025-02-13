@@ -1083,7 +1083,8 @@ def parse_query_times(key_frame, time_type='utc'):
     return time_strings, jds
 
 
-def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2, **kwargs):
+def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2,
+                          timeout=60, **kwargs):
     """
     Execute a DRMS query with retry logic on timeout or connection failure.
 
@@ -1093,6 +1094,7 @@ def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2, **
         keys (str or list): Query parameters.
         max_retries (int): Number of retry attempts.
         delay (int): Seconds to wait between retries.
+        timeout (int): Seconds to wait before
         **kwargs: Additional arguments for drms.Client.query().
 
     Returns:
@@ -1104,7 +1106,7 @@ def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2, **
             print(f"Attempt {attempt + 1}: DRMS query {query_string}")
 
             # Perform the DRMS query
-            result = client.query(query_string, key=keys, **kwargs)
+            result = client.query(query_string, key=keys, timeout=timeout, **kwargs)
 
             print("Query successful.")
             return result  # Return the successful result
