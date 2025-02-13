@@ -116,7 +116,9 @@ class HMI_M720s:
         The prime key syntax for hmi.m_720s is used here
         """
         query_string = '%s[%s_TAI][%s]'%(self.series, init_query.time.iloc[0], init_query.camera.iloc[0])
-        drms_frame = self.client.query(query_string, key="**ALL**")
+        # drms_frame = self.client.query(query_string, key="**ALL**")
+        drms_frame = drms_query_with_retry(self.client, query_string, keys="**ALL**",
+                                           max_retries=5, delay=2)
         # remove unwanted fields
         all_cols = set(drms_frame.keys())
         keep_cols = all_cols.difference(set(self.hdr_keys_to_delete))
@@ -318,18 +320,22 @@ class HMI_M720s:
         fpath = dir + os.sep + fname
 
         # download the file
-        exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+        # exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
+        exit_flag = io_helpers.download_url_with_requests(url, fpath, max_retries=5, delay=2,
+                                                          verbose=verbose, overwrite=overwrite)
 
+        # if exit_flag == 1:
+        #     # There was an error with download. Try again
+        #     print(" Re-trying download....")
+        #     exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
         if exit_flag == 1:
-            # There was an error with download. Try again
-            print(" Re-trying download....")
-            exit_flag = io_helpers.download_url(url, fpath, verbose=verbose, overwrite=overwrite)
-            if exit_flag == 1:
-                # Download failed. Return None
-                return None, None, exit_flag
+            # Download failed. Return None
+            return None, None, exit_flag
 
         # update the header info if desired
-        if update:
+        if update and (exit_flag != 2):
+            # not entirely clear what default behavior should be when file exists and
+            # overwrite=False....
             if verbose:
                 print('  Updating header info if necessary.')
             drms_query = data_series.to_frame().T
@@ -430,7 +436,7 @@ class HMI_B720s:
         """
         query_string = '%s[%s_TAI]'%(self.series, init_query.time.iloc[0])
         # drms_frame = self.client.query(query_string, key="**ALL**")
-        drms_frame = drms_query_with_retry(self, query_string, keys="**ALL**",
+        drms_frame = drms_query_with_retry(self.client, query_string, keys="**ALL**",
                                            max_retries=5, delay=2)
 
         if drms_frame is not None:
@@ -663,7 +669,9 @@ class HMI_B720s:
                 break
 
             # update the header info if desired
-            if update:
+            if update and (seg_exit_flag != 2):
+                # not entirely clear what default behavior should be when file exists and
+                # overwrite=False....
                 if verbose:
                     print('  Updating header info if necessary.')
                 drms_query = data_series.to_frame().T
