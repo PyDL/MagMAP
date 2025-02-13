@@ -41,7 +41,7 @@ del_interval = datetime.timedelta(minutes=20)
 target_minute = 48
 # set these to None for automatic updates
 fixed_period_start = None
-fixed_period_end = datetime.datetime(2024, 2, 1, 1, target_minute, 0, tzinfo=datetime.timezone.utc)
+fixed_period_end = datetime.datetime(2024, 4, 1, 1, target_minute, 0, tzinfo=datetime.timezone.utc)
 
 # index file name
 index_file = "all-files.csv"
@@ -49,7 +49,7 @@ index_file = "all-files.csv"
 # ----- End Inputs -------------------------
 
 # read data directory (would be faster—but less robust—to read existing index files)
-robust = False
+robust = True
 if robust:
     available_raw_B = io_helpers.read_db_dir(raw_dirname_B)
 else:
@@ -147,7 +147,7 @@ for index, row in match_times.iterrows():
             data_series=vec_row, base_dir=raw_dirname_B, segments=segments_B,
             update=True, overwrite=False, verbose=True
         )
-        if any(exit_flag_b != 0):
+        if (exit_flag != 0) or any(exit_flag_b != 0):
             # If not all segments downloaded successfully, clean-up the remainder
             print("Cleaning-up any partial segment files for this timestamp.")
             hmi_vec.cleanup_download_image_fixed(data_series=vec_row, base_dir=raw_dirname_B,
