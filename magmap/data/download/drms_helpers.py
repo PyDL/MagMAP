@@ -24,6 +24,7 @@ from http.client import HTTPException
 from collections import OrderedDict
 import requests
 import time
+import signal
 
 from magmap.utilities.file_io import io_helpers
 
@@ -1083,8 +1084,17 @@ def parse_query_times(key_frame, time_type='utc'):
     return time_strings, jds
 
 
+# Define a custom exception for timeouts
+class TimeoutException(Exception):
+    pass
+
+# Handler function to raise the timeout exception
+def timeout_handler(signum, frame):
+    raise TimeoutException("The DRMS query has timed out.")
+
+
 def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2,
-                          timeout=60, **kwargs):
+                          timeout_duration=90, **kwargs):
     """
     Execute a DRMS query with retry logic on timeout or connection failure.
 
@@ -1094,7 +1104,7 @@ def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2,
         keys (str or list): Query parameters.
         max_retries (int): Number of retry attempts.
         delay (int): Seconds to wait between retries.
-        timeout (int): Seconds to wait before
+        timeout_duration (int): Seconds to wait before timeout of query.
         **kwargs: Additional arguments for drms.Client.query().
 
     Returns:
@@ -1102,14 +1112,24 @@ def drms_query_with_retry(client, query_string, keys, max_retries=5, delay=2,
     """
     attempt = 0
     while attempt < max_retries:
+        # Set the timeout handler
+        signal.signal(signal.SIGALRM, timeout_handler)
+        # Start the timer
+        signal.alarm(timeout_duration)
         try:
             print(f"Attempt {attempt + 1}: DRMS query {query_string}")
 
             # Perform the DRMS query
-            result = client.query(query_string, key=keys, timeout=timeout, **kwargs)
+            result = client.query(query_string, key=keys, **kwargs)
+
+            # Disable the alarm after success
+            signal.alarm(0)
 
             print("Query successful.")
             return result  # Return the successful result
+
+        except TimeoutException as e:
+            print(e)
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             print(f"Network error: {e}. Retrying in {delay} seconds...")
