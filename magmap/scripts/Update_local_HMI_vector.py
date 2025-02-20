@@ -157,7 +157,7 @@ while period_end >= period_start:
                 data_series=vec_row, base_dir=raw_dirname_B, segments=segments_B,
                 update=True, overwrite=False, verbose=True
             )
-            if (exit_flag != 0) or any(exit_flag_b != 0):
+            if (exit_flag not in [0, 2]) or any(exit_flag_b != 0):
                 # If not all segments downloaded successfully, clean-up the remainder
                 print("Cleaning-up any partial segment files for this timestamp.")
                 hmi_vec.cleanup_download_image_fixed(data_series=vec_row, base_dir=raw_dirname_B,

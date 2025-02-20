@@ -100,6 +100,9 @@ class HMI_M720s:
 
         # get the corresponding header info from the JSOC as a drms frame
         drms_frame = self.get_drms_info_for_image(drms_query)
+        # check for failed query
+        if drms_frame is None:
+            return 1
 
         # update the header info
         hdr_update = self.update_header_fields_from_drms(hdr, drms_frame,
@@ -109,6 +112,7 @@ class HMI_M720s:
         hdu_in[1].header = hdr_update
         hdu_in.close()
 
+        return 0
 
     def get_drms_info_for_image(self, init_query):
         """
@@ -120,6 +124,10 @@ class HMI_M720s:
         # drms_frame = self.client.query(query_string, key="**ALL**")
         drms_frame = drms_query_with_retry(self.client, query_string, keys="**ALL**",
                                            max_retries=5, delay=2)
+
+        # check for unsuccessful query
+        if drms_frame is None:
+            return None
         # remove unwanted fields
         all_cols = set(drms_frame.keys())
         keep_cols = all_cols.difference(set(self.hdr_keys_to_delete))
@@ -300,7 +308,8 @@ class HMI_M720s:
         the single image results from the query)
         - you can obtain these by doing data_framge = key=keys.iloc[row_index]
         The sub_path and filename are determined from the image information
-        exit_flag: 0-Successful download; 1-download error; 2-file already exists
+        exit_flag: 0-Successful download; 1-download error; 2-file already exists;
+                   3-failed header update
         """
         if len(data_series.shape) != 1:
             raise RuntimeError('data_series has more than one row!')
@@ -340,7 +349,9 @@ class HMI_M720s:
             if verbose:
                 print('  Updating header info if necessary.')
             drms_query = data_series.to_frame().T
-            self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+            query_flag = self.update_hmi_fits_header(fpath, drms_query, verbose=False)
+            if query_flag==1:
+                exit_flag = 3
 
         print("")
         # now separate the the sub directory from the base path (i want relative path for the DB)
