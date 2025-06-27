@@ -582,6 +582,8 @@ def read_hmi720s_vector(fits_file, file_format='PSI', make_map=False):
     mag_file = fits_file.replace("field", "magnetogram")
     if file_format == 'nwra':
         mag_file = mag_file.replace(".b_", ".m_")
+    else:
+        mag_file = mag_file.replace("_b_", "_m_")
     if not os.path.exists(mag_file):
         print("Warning: Vector data not loaded. M-series magnetogram file does not exist at path: " +
               mag_file)

@@ -15,19 +15,23 @@ import magmap.maps.hipft_prep as hipft_prep
 import magmap.maps.util.map_manip as map_manip
 import magmap.utilities.file_io.io_helpers as io_helpers
 import magmap.utilities.plotting.psi_plotting as psi_plt
+from magmap.scripts.Update_local_HMI_vector import fixed_period_start
 
 # ---- Inputs -----------------------------
 # select the data series
 series = 'hmi.m_720s'
 # series = 'hmi.m_720s_nrt'
+# series = 'hmi.b_720s'
 
 if series == 'hmi.m_720s':
     raw_dirname = 'hmi_m720s'
     map_dirname = 'hmi_hipft'
-
 elif series == 'hmi.m_720s_nrt':
     raw_dirname = 'hmi_m720s_nrt'
     map_dirname = 'hmi_hipft_m720s_nrt'
+elif series == 'hmi.b_720s':
+    raw_dirname = 'hmi_b720s'
+    map_dirname = 'hmi_hipft_b'
 
 # data-file dirs
 base_dir = f'/Volumes/extdata3/oft'
@@ -36,6 +40,16 @@ map_data_dir = f"{base_dir}/processed_maps/{map_dirname}"
 
 # index file name
 index_file = "all-files.csv"
+
+# set these to None for automatic updates
+# fixed_period_start = datetime.datetime(2025, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+fixed_period_start = None
+# fixed_period_end = datetime.datetime(2025, 2, 10, 0, 0, 0, tzinfo=datetime.timezone.utc)
+fixed_period_end = None
+
+# if fixed_period pars are None, look for all images that have not been converted to maps
+# False: only look for images after the latest map to update
+update_all = True
 
 # number of parallel processors and threads-per-processor
 nprocs = 1
@@ -58,21 +72,38 @@ print("\nReading filesystem from dir: " + raw_data_dir + "\n")
 available_raw = io_helpers.read_db_dir(raw_data_dir)
 if len(available_raw) == 0:
     raise BaseException(f'Could not find any files in {raw_data_dir}')
+if series == 'hmi.b_720s':
+    # reduce dataframe rows to only 'field'-segment filenames
+    available_raw = available_raw[available_raw['rel_path'].str.contains(
+        'field', case=True, na=False
+    )].reset_index(drop=True)
 
 print("\nReading filesystem from dir: " + map_data_dir + "\n")
 available_map = io_helpers.read_db_dir(map_data_dir)
 
-# select all maps between these dates
-if len(available_map) > 0:
-    min_datetime_thresh = available_map.date.iloc[-1].to_pydatetime()
+
+if update_all:
+    if len(available_map) > 0:
+        keep_ind = ~available_raw.date.isin(available_map.date)
+        available_raw = available_raw.loc[keep_ind, :]
 else:
-    # if no maps have been processed, take the earliest time minus 10 mins
-    min_datetime_thresh = available_raw.date.iloc[0].to_pydatetime() - datetime.timedelta(minutes=10)
+    # select all images that are more recent than the oldest map
+    if len(available_map) > 0:
+        min_datetime_thresh = available_map.date.iloc[-1].to_pydatetime()
+    else:
+        # if no maps have been processed, take the earliest time minus 10 mins
+        min_datetime_thresh = available_raw.date.iloc[0].to_pydatetime() - datetime.timedelta(minutes=10)
 
-# select only files/maps between thresh datetimes
-keep_ind = (available_raw.date > min_datetime_thresh)
-available_raw = available_raw.loc[keep_ind, :]
+    # select only files/maps between thresh datetimes
+    keep_ind = (available_raw.date > min_datetime_thresh)
+    available_raw = available_raw.loc[keep_ind, :]
 
+if fixed_period_start is not None:
+    keep_ind = (available_raw.date >= fixed_period_start)
+    available_raw = available_raw.loc[keep_ind, :]
+if fixed_period_end is not None:
+    keep_ind = (available_raw.date <= fixed_period_end)
+    available_raw = available_raw.loc[keep_ind, :]
 
 # initiate a pool of processors
 # p_pool = Pool(nprocs)
@@ -114,7 +145,10 @@ for index, row in available_raw.iterrows():
     sub_dir = os.path.dirname(rel_path)
 
     # determine path and filename
-    map_filename = fname.replace("_m_", "_map_")
+    if series == 'hmi.b_720s':
+        map_filename = fname.replace("_field", "_map")
+    else:
+        map_filename = fname.replace("_m_", "_map_")
     map_filename = map_filename.replace(".fits", ".h5")
     map_rel = os.path.join(sub_dir, map_filename)
     # check that directory exists
@@ -126,8 +160,16 @@ for index, row in available_raw.iterrows():
         continue
     # load to LosMagneto object
     full_path = os.path.join(raw_data_dir, rel_path)
-    hmi_im = psi_dtypes.read_hmi720s(full_path, make_map=False, solar_north_up=False)
+    if series == 'hmi.m_720s':
+        hmi_im = psi_dtypes.read_hmi720s(full_path, make_map=False, solar_north_up=False)
+    elif series == 'hmi.b_720s':
+        # load segments into a VectorMagneto object
+        load_flag, hmi_im = psi_dtypes.read_hmi720s_vector(fits_file=full_path)
+
     IOtime += time.time() - start_time
+    if series == 'hmi.b_720s' and load_flag == 1:
+        print("Cannot load vector data. Proceeding to next timestamp.")
+        continue
 
     # approximate 'full' map resolution
     # if index == 0:
@@ -140,15 +182,27 @@ for index, row in available_raw.iterrows():
     # psi_plt.PlotDisk_wInterpGrid(disk_image=hmi_im, nfig=0, plot_attr="Br", map_x=x_axis, map_y=sin_lat, R0=R0)
 
     start_time = time.time()
-    # interpolate to map
-    hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat, interp_field="data",
-                                   nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
-                                   y_cor=False, helio_proj=True)
-    interp_time += time.time() - start_time
+    if series == "hmi.b_720s":
+        # Calculate Br and merge vector segments with LOS
+        hmi_im.get_coordinates(R0=R0, helio="SH")
+        # Calculate Br
+        hmi_im.calc_Br(R0=R0)
+        # interpolate to map
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat, interp_field="Br",
+                                       nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
+                                       y_cor=False, helio_proj=True)
+    else:
+        # interpolate to map
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat, interp_field="data",
+                                       nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
+                                       y_cor=False, helio_proj=True)
 
-    # convert interpolated map values to Br
-    data_index = hmi_map.data > hmi_map.no_data_val
-    hmi_map.data[data_index] = hmi_map.data[data_index] / hmi_map.mu[data_index]
+    if series == "hmi.m_720s":
+        # convert interpolated map values to Br
+        data_index = hmi_map.data > hmi_map.no_data_val
+        hmi_map.data[data_index] = hmi_map.data[data_index] / hmi_map.mu[data_index]
+
+    interp_time += time.time() - start_time
 
     start_time = time.time()
     # down-sample by integration
