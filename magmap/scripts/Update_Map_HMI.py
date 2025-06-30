@@ -120,7 +120,8 @@ y_interp = y_axis.copy()
 y_interp[0] = y_interp[0] + dy/4
 y_interp[-1] = y_interp[-1] - dy/4
 # interp expects sin(lat)
-sin_lat = np.sin(y_interp)
+sin_lat_interp = np.sin(y_interp)
+sin_lat = np.sin(y_axis)
 
 # setup reduced-map grid (for saving to file)
 reduced_x = np.linspace(x_range[0], x_range[1], reduced_nxcoord)
@@ -188,12 +189,12 @@ for index, row in available_raw.iterrows():
         # Calculate Br
         hmi_im.calc_Br(R0=R0)
         # interpolate to map
-        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat, interp_field="Br",
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat_interp, interp_field="Br",
                                        nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
                                        y_cor=False, helio_proj=True)
     else:
         # interpolate to map
-        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat, interp_field="data",
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat_interp, interp_field="data",
                                        nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
                                        y_cor=False, helio_proj=True)
 
@@ -201,6 +202,9 @@ for index, row in available_raw.iterrows():
         # convert interpolated map values to Br
         data_index = hmi_map.data > hmi_map.no_data_val
         hmi_map.data[data_index] = hmi_map.data[data_index] / hmi_map.mu[data_index]
+
+    # reset y-axis to standard grid definition
+    hmi_map.y = sin_lat
 
     interp_time += time.time() - start_time
 

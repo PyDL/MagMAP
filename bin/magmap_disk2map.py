@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import numpy as np
 import pandas as pd
 import datetime
@@ -114,12 +115,11 @@ def argParsing():
             type=float,
             required=False)
 
-#  parser.add_argument('-dataseries',
-#            help='Data series of the downlaoded disk image dataset.',
-#            dest='series',
-#            default='hmi.m_720s',
-#            type=float,
-#            required=False)
+  parser.add_argument('-dataseries',
+            help='Data series of the downlaoded disk image dataset.',
+            dest='series',
+            default='hmi.m_720s',  # 'hmi.b_720s'
+            required=False)
 
   return parser.parse_args()
 
@@ -138,6 +138,7 @@ def run(args):
   map_nycoord        = args.map_nycoord
   map_nxcoord        = args.map_nxcoord
   R0                 = args.R0
+  series             = args.series
 
   # Suppress Pandas FutureWarnings
   warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -175,6 +176,10 @@ def run(args):
       available_raw = io_helpers.read_db_dir(raw_data_dir)
   if len(available_raw) == 0:
       raise BaseException(f'Could not find any files in {raw_data_dir}')
+  if series == 'hmi.b_720s':
+      # reduce dataframe rows to only 'field'-segment filenames
+      available_raw = available_raw[available_raw['rel_path'].str.contains(
+          'field', case=True, na=False)].reset_index(drop=True)
 
 # initial time
   if period_start_input.lower() == "auto":
@@ -250,7 +255,7 @@ def run(args):
   loop_idx = 0
 
   for index, row in available_raw.iterrows():
- 
+
     loop_idx = loop_idx + 1
 
     start_time = time.time()
@@ -261,7 +266,10 @@ def run(args):
     sub_dir = os.path.dirname(rel_path)
 
     # determine path and filename
-    map_filename = fname.replace("_m_", "_map_")
+    if series == 'hmi.b_720s':
+        map_filename = fname.replace("_field", "_map")
+    else:
+        map_filename = fname.replace("_m_", "_map_")
     map_filename = map_filename.replace(".fits", ".h5")
     map_rel = os.path.join(sub_dir, map_filename)
     # check that directory exists
@@ -275,31 +283,50 @@ def run(args):
     # load to LosMagneto object
     full_path = os.path.join(raw_data_dir, rel_path)
 
-    hmi_im = psi_dtypes.read_hmi720s(full_path, make_map=False, solar_north_up=False)
+    if series == 'hmi.m_720s':
+        hmi_im = psi_dtypes.read_hmi720s(full_path, make_map=False, solar_north_up=False)
+    elif series == 'hmi.b_720s':
+        # load segments into a VectorMagneto object
+        load_flag, hmi_im = psi_dtypes.read_hmi720s_vector(fits_file=full_path)
 
     IOtime += time.time() - start_time
+    # check for incomplete vector file sets
+    if series == 'hmi.b_720s' and load_flag == 1:
+        print("Cannot load vector data. Proceeding to next timestamp.")
+        continue
 
     start_time = time.time()
 
     print("\nStep "+str(loop_idx)+"/"+str(len(available_raw)))
 
-    # interpolate to map
-    hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat_interp, interp_field="data",
-                                   nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
-                                   y_cor=False, helio_proj=True)
-    # replace y-axis with original sin_lat grid
+    if series == "hmi.b_720s":
+        # Calculate Br and merge vector segments with LOS
+        hmi_im.get_coordinates(R0=R0, helio="SH")
+        # Calculate Br
+        hmi_im.calc_Br(R0=R0)
+        # interpolate to map
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat_interp, interp_field="Br",
+                                       nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
+                                       y_cor=False, helio_proj=True)
+    else:
+        # interpolate to map
+        hmi_map = hmi_im.interp_to_map(R0=R0, map_x=x_axis, map_y=sin_lat_interp, interp_field="data",
+                                       nprocs=nprocs, tpp=tpp, p_pool=p_pool, no_data_val=-65500.,
+                                       y_cor=False, helio_proj=True)
+
+    # replace sin_lat_interp y-axis with original sin_lat grid
     hmi_map.y = sin_lat
 
     interp_time += time.time() - start_time
 
-    # convert interpolated map values to Br
-    data_index = hmi_map.data > hmi_map.no_data_val
-
-    hmi_map.data[data_index] = hmi_map.data[data_index] / hmi_map.mu[data_index]
+    if series == "hmi.m_720s":
+        # convert interpolated map values to Br
+        data_index = hmi_map.data > hmi_map.no_data_val
+        hmi_map.data[data_index] = hmi_map.data[data_index] / hmi_map.mu[data_index]
 
     start_time = time.time()
     # down-sample by integration
-    reduced_map = map_manip.downsamp_reg_grid(full_map=hmi_map, new_y=reduced_sin_lat, 
+    reduced_map = map_manip.downsamp_reg_grid(full_map=hmi_map, new_y=reduced_sin_lat,
                                               new_x=reduced_x, image_method=0,
                                               periodic_x=True, y_units='sinlat', uniform_poles=True,
                                               uniform_no_data=True)
@@ -322,6 +349,7 @@ def run(args):
 
     print("")
 
+  print("Map creation complete. Generating new map index file.")
 # read updated filesystem
   hipft_index = io_helpers.gen_hipft_index(map_data_dir)
 # check that directory exists
@@ -346,7 +374,7 @@ def run(args):
     print(' ')
     print('----------------  Timing -------------------')
     print(' ')
-    if total_time >0: 
+    if total_time >0:
       print(format_str % ("Input/Output:     ", IOtime,          IOtime/total_time*100))
       print(format_str % ("Image processing: ", image_proc_time, image_proc_time/total_time*100))
       print(format_str % ("Interpolation:    ", interp_time,     interp_time/total_time*100))
@@ -355,7 +383,7 @@ def run(args):
     print('--------------------------------------------')
     print(format_str % ("Total:            ", total_time,      100.0))
     print('---------------------------------------------')
-    
+
   print("")
   print("MagMAP mapping complete!")
 

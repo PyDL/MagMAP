@@ -1,0 +1,17 @@
+python3 magmap_disk2map.py [-odir MAP_DATA_DIR]
+                          [-startdate PERIOD_START_INPUT]
+                          [-enddate PERIOD_END_INPUT]
+                          [-index_filename_disks INDEX_FILE_DISKS]
+                          [-index_filename_maps INDEX_FILE_MAPS]
+                          [-ntout REDUCED_NYCOORD] [-npout REDUCED_NXCOORD]
+                          [-ntinterp MAP_NYCOORD] [-npinterp MAP_NXCOORD]
+                          [-r0 R0] [-dataseries SERIES]
+                          raw_data_dir
+
+
+# ---- Test calls ----
+# convert one vector-disk from 2025 April 01 00:48:00 to a map using default precisions
+python3 magmap_disk2map.py -odir /Volumes/extdata3/oft/processed_maps/hmi_hipft_b -startdate 2025-04-01T00:15:00 -enddate 2025-04-01T01:15:00 -index_filename_disks all-files.csv -index_filename_maps all-files.csv -ntout 512 -npout 1024 -ntinterp 5120 -npinterp 10240 -r0 1.0 -dataseries hmi.b_720s /Volumes/extdata3/oft/raw_data/hmi_b720s &
+
+# convert all vector-disks to maps using default precisions
+python3 magmap_disk2map.py -odir /Volumes/extdata3/oft/processed_maps/hmi_hipft_b -index_filename_disks all-files.csv -index_filename_maps all-files.csv -dataseries hmi.b_720s /Volumes/extdata3/oft/raw_data/hmi_b720s &
