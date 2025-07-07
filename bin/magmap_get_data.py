@@ -6,12 +6,13 @@ import datetime
 import argparse
 import pytz
 import signal
+import time
 #
 import magmap.data.download.drms_helpers as drms_helpers
 import magmap.utilities.file_io.io_helpers as io_helpers
 #
 ########################################
-#  MAGMAP_GET_DATA.PY:  Version 1.0.0  #
+#  MAGMAP_GET_DATA.PY:  Version 1.1.0  #
 ########################################
 ########################################################################
 #          Predictive Science Inc.
@@ -134,19 +135,30 @@ def run(args):
 
   total_possible_files = len(match_times)
 
+  retries = 10
+
   for index, row in match_times.iterrows():
     time_diff = available_datetimes - row.target_time.to_pydatetime()
     time_diff = np.abs(time_diff)
     best_match = time_diff.argmin()
     if time_diff[best_match] <= del_interval:
       # download resulting magnetogram
-      print(f'\nStep {index+1}/{total_possible_files}:  Acquiring data for {available_hmi.loc[best_match].time}, quality code: {available_hmi.loc[best_match].quality}')
-      sub_dir, fname, exit_flag = hmi.download_image_fixed_format(
-          data_series=available_hmi.loc[best_match], base_dir=download_dir,
-          update=True, overwrite=False, verbose=True
-      )
+      print(f'\nStep {index+1}/{total_possible_files}:  Acquiring data for {available_hmi.loc[best_match].time}, quality code: {available_hmi.loc[best_match].quality}', flush = True)
+      for attempt in range(retries):
+        try:
+          sub_dir, _, _ = hmi.download_image_fixed_format(
+              data_series=available_hmi.loc[best_match], base_dir=download_dir,
+              update=True, overwrite=False, verbose=True
+          )
+          break
+        except TimeoutError:
+          print(f"Attempt {attempt+1} failed, retrying...", flush = True)
+          time.sleep(2)
+      else:
+        print("Download failed after multiple attempts.")
+
     else:
-      print(f'\nStep {index}/{total_possible_files}: --> NO SUITABLE DATA FOR SELECTED INTERVAL AT: {row.hmi_time}')
+      print(f'\nStep {index}/{total_possible_files}: --> NO SUITABLE DATA FOR SELECTED INTERVAL AT: {row.hmi_time}', flush = True)
 
 # read the updated filesystem
   available_raw = io_helpers.read_db_dir(download_dir)
